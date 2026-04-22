@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Photo Album</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: monospace; background: #f5f5f5; color: #222; padding: 40px 20px; max-width: 900px; margin: 0 auto; }
+    h1 { font-size: 1.5rem; margin-bottom: 30px; }
+    section { margin-bottom: 40px; }
+    h2 { font-size: 1rem; margin-bottom: 10px; border-bottom: 1px solid #ccc; padding-bottom: 5px; }
+    input[type="text"], input[type="file"] { width: 100%; padding: 8px; font-family: monospace; font-size: 0.9rem; border: 1px solid #aaa; background: #fff; margin-bottom: 8px; }
+    button { padding: 8px 16px; font-family: monospace; font-size: 0.9rem; background: #222; color: #fff; border: none; cursor: pointer; }
+    button:hover { background: #444; }
+    #status { margin-top: 10px; font-size: 0.85rem; color: #555; }
+    #results { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; margin-top: 16px; }
+    .photo-card img { width: 100%; height: 160px; object-fit: cover; display: block; border: 1px solid #ccc; }
+    .photo-card .photo-labels { font-size: 0.75rem; color: #555; margin-top: 4px; word-break: break-word; }
+    #no-results { font-size: 0.85rem; color: #888; display: none; }
+  </style>
+</head>
+<body>
+  <h1>Photo Album</h1>
+
+  <section>
+    <h2>Search Photos</h2>
+    <input type="text" id="search-input" placeholder="e.g. show me boats, trees and birds" />
+    <button onclick="searchPhotos()">Search</button>
+    <div id="status"></div>
+    <div id="no-results">No results found.</div>
+    <div id="results"></div>
+  </section>
+
+  <section>
+    <h2>Upload Photo</h2>
+    <input type="file" id="upload-file" accept="image/*" />
+    <input type="text" id="custom-labels" placeholder="Custom labels (comma separated, e.g. Sam, Sally)" />
+    <button onclick="uploadPhoto()">Upload</button>
+    <div id="upload-status"></div>
+  </section>
+
+  <script>
+    const API_BASE = 'https://gf8zuq42z5.execute-api.us-east-1.amazonaws.com/prod';
+
+    async function searchPhotos() {
+      const query = document.getElementById('search-input').value.trim();
+      const statusEl = document.getElementById('status');
+      const resultsEl = document.getElementById('results');
+      const noResultsEl = document.getElementById('no-results');
+
+      if (!query) { statusEl.textContent = 'Please enter a search query.'; return; }
+
+      statusEl.textContent = 'Searching...';
+      resultsEl.innerHTML = '';
+      noResultsEl.style.display = 'none';
+
+      try {
+        const response = await fetch(`${API_BASE}/search?q=${encodeURIComponent(query)}`);
+        const data = await response.json();
+        const results = data.results || [];
+        statusEl.textContent = `Found ${results.length} result(s).`;
+
+        if (results.length === 0) { noResultsEl.style.display = 'block'; return; }
+
+        results.forEach(photo => {
+          const card = document.createElement('div');
+          card.className = 'photo-card';
+          const img = document.createElement('img');
+          img.src = photo.url;
+          img.alt = photo.labels.join(', ');
+          img.onerror = () => { img.style.display = 'none'; };
+          const labels = document.createElement('div');
+          labels.className = 'photo-labels';
+          labels.textContent = photo.labels.join(', ');
+          card.appendChild(img);
+          card.appendChild(labels);
+          resultsEl.appendChild(card);
+        });
+      } catch (err) {
+        statusEl.textContent = 'Error: ' + err.message;
+      }
+    }
+
+    async function uploadPhoto() {
+      const fileInput = document.getElementById('upload-file');
+      const customLabels = document.getElementById('custom-labels').value.trim();
+      const statusEl = document.getElementById('upload-status');
+
+      if (!fileInput.files[0]) { statusEl.textContent = 'Please select a file.'; return; }
+
+      const file = fileInput.files[0];
+      const filename = file.name;
+      const fileType = file.type || 'image/jpeg';
+
+      statusEl.textContent = 'Uploading...';
+      const arrayBuffer = await file.arrayBuffer();
+
+      let uploadUrl = `${API_BASE}/photos/${encodeURIComponent(filename)}`;
+      if (customLabels) {
+        uploadUrl += `?customlabels=${encodeURIComponent(customLabels)}`;
+      }
+
+      try {
+        const response = await fetch(uploadUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': fileType },
+          body: arrayBuffer,
+        });
+
+        if (response.ok || response.status === 200) {
+          statusEl.textContent = `✅ "${filename}" uploaded successfully!`;
+          fileInput.value = '';
+          document.getElementById('custom-labels').value = '';
+        } else {
+          statusEl.textContent = `Upload failed: ${response.status} ${response.statusText}`;
+        }
+      } catch (err) {
+        statusEl.textContent = 'Error: ' + err.message;
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('search-input').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') searchPhotos();
+      });
+    });
+  </script>
+</body>
+</html>
