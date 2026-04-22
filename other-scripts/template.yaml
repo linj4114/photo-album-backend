@@ -1,0 +1,224 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Photo Album Application Stack
+
+Resources:
+
+  # S3 Bucket for photos storage (B2)
+  PhotoStorageBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'photo-album-storage-${AWS::AccountId}'
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ['*']
+            AllowedMethods: [GET, PUT]
+            AllowedOrigins: ['*']
+
+  # S3 Bucket for frontend (B1)
+  PhotoFrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'photo-album-frontend-${AWS::AccountId}'
+      WebsiteConfiguration:
+        IndexDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  # Bucket policy to make frontend public
+  PhotoFrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref PhotoFrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Sub '${PhotoFrontendBucket.Arn}/*'
+
+  # IAM Role for Lambda functions
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: PhotoAlbumLambdaRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonRekognitionReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonOpenSearchServiceFullAccess
+        - arn:aws:iam::aws:policy/AmazonLexFullAccess
+
+  # Lambda function LF1 - index-photos
+  IndexPhotosFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: index-photos-cf
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import urllib.parse
+          from datetime import datetime
+          import requests
+          from aws_requests_auth.aws_auth import AWSRequestsAuth
+
+          REGION = 'us-east-1'
+          ES_ENDPOINT = 'https://search-photos-o2rzcc7mruqikzvgt4hov3bcoa.us-east-1.es.amazonaws.com'
+          ES_HOST = 'search-photos-o2rzcc7mruqikzvgt4hov3bcoa.us-east-1.es.amazonaws.com'
+          ES_INDEX = 'photos'
+
+          def get_es_auth():
+              credentials = boto3.Session().get_credentials()
+              credentials = credentials.get_frozen_credentials()
+              return AWSRequestsAuth(
+                  aws_access_key=credentials.access_key,
+                  aws_secret_access_key=credentials.secret_key,
+                  aws_token=credentials.token,
+                  aws_host=ES_HOST,
+                  aws_region=REGION,
+                  aws_service='es'
+              )
+
+          def lambda_handler(event, context):
+              s3 = boto3.client('s3')
+              rekognition = boto3.client('rekognition', region_name=REGION)
+              bucket = event['Records'][0]['s3']['bucket']['name']
+              key = urllib.parse.unquote_plus(event['Records'][0]['s3']['object']['key'])
+              rek_response = rekognition.detect_labels(
+                  Image={'S3Object': {'Bucket': bucket, 'Name': key}},
+                  MaxLabels=10, MinConfidence=70
+              )
+              labels = [label['Name'].lower() for label in rek_response['Labels']]
+              head = s3.head_object(Bucket=bucket, Key=key)
+              metadata = head.get('Metadata', {})
+              custom_labels_raw = metadata.get('customlabels', '')
+              if custom_labels_raw:
+                  custom_labels = [l.strip().lower() for l in custom_labels_raw.split(',')]
+                  labels.extend(custom_labels)
+              document = {
+                  'objectKey': key, 'bucket': bucket,
+                  'createdTimestamp': datetime.now().isoformat(), 'labels': labels
+              }
+              url = f"{ES_ENDPOINT}/{ES_INDEX}/_doc"
+              headers = {"Content-Type": "application/json"}
+              auth = get_es_auth()
+              response = requests.post(url, auth=auth, json=document, headers=headers)
+              return {'statusCode': 200, 'body': json.dumps('Photo indexed successfully')}
+
+  # Lambda function LF2 - search-photos
+  SearchPhotosFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: search-photos-cf
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import requests
+          from aws_requests_auth.aws_auth import AWSRequestsAuth
+
+          REGION = 'us-east-1'
+          ES_ENDPOINT = 'https://search-photos-o2rzcc7mruqikzvgt4hov3bcoa.us-east-1.es.amazonaws.com'
+          ES_HOST = 'search-photos-o2rzcc7mruqikzvgt4hov3bcoa.us-east-1.es.amazonaws.com'
+          ES_INDEX = 'photos'
+          LEX_BOT_ID = 'YOUR_BOT_ID'
+          LEX_BOT_ALIAS_ID = 'YOUR_ALIAS_ID'
+
+          def lambda_handler(event, context):
+              query = event.get('queryStringParameters', {}).get('q', '')
+              if not query:
+                  return {'statusCode': 200, 'body': json.dumps({'results': []})}
+              return {'statusCode': 200, 'body': json.dumps({'results': []})}
+
+  # API Gateway REST API
+  PhotoSearchAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: PhotoSearchAPI-CF
+      Description: Photo Search API
+
+  # /search resource
+  SearchResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref PhotoSearchAPI
+      ParentId: !GetAtt PhotoSearchAPI.RootResourceId
+      PathPart: search
+
+  # GET /search method
+  SearchMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref PhotoSearchAPI
+      ResourceId: !Ref SearchResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SearchPhotosFunction.Arn}/invocations'
+
+  # /photos resource
+  PhotosResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref PhotoSearchAPI
+      ParentId: !GetAtt PhotoSearchAPI.RootResourceId
+      PathPart: photos
+
+  # /photos/{filename} resource
+  PhotosFilenameResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref PhotoSearchAPI
+      ParentId: !Ref PhotosResource
+      PathPart: '{filename}'
+
+  # API Gateway Deployment
+  APIDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: SearchMethod
+    Properties:
+      RestApiId: !Ref PhotoSearchAPI
+      StageName: prod
+
+# Outputs
+Outputs:
+  FrontendURL:
+    Description: URL of the frontend website
+    Value: !GetAtt PhotoFrontendBucket.WebsiteURL
+
+  StorageBucketName:
+    Description: Name of the photo storage bucket
+    Value: !Ref PhotoStorageBucket
+
+  APIEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${PhotoSearchAPI}.execute-api.${AWS::Region}.amazonaws.com/prod'
+
+  IndexPhotosFunctionArn:
+    Description: ARN of the index-photos Lambda function
+    Value: !GetAtt IndexPhotosFunction.Arn
+
+  SearchPhotosFunctionArn:
+    Description: ARN of the search-photos Lambda function
+    Value: !GetAtt SearchPhotosFunction.Arn

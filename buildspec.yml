@@ -1,0 +1,11 @@
+version: 0.2
+
+phases:
+  build:
+    commands:
+      - echo "Copying frontend files"
+      - cp front-end/index.html ./index.html
+
+artifacts:
+  files:
+    - index.html
